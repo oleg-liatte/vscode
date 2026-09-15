@@ -21,7 +21,7 @@ import { SyncDescriptor } from '../../../../platform/instantiation/common/descri
 import { ModesRegistry } from '../../../../editor/common/languages/modesRegistry.js';
 import { Codicon } from '../../../../base/common/codicons.js';
 import { registerIcon } from '../../../../platform/theme/common/iconRegistry.js';
-import { ContextKeys, SCMViewPane } from './scmViewPane.js';
+import { ContextKeys, SCMViewPane, TOGGLE_HIDE_CLEAN_REPOSITORIES_ACTION_ID } from './scmViewPane.js';
 import { RepositoryPicker } from './scmViewService.js';
 import { SCMRepositoriesViewPane } from './scmRepositoriesViewPane.js';
 import { IInstantiationService, ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
@@ -80,6 +80,18 @@ viewsRegistry.registerViewWelcomeContent(VIEW_PANE_ID, {
 viewsRegistry.registerViewWelcomeContent(VIEW_PANE_ID, {
 	content: `[${localize('manageWorkspaceTrustAction', "Manage Workspace Trust")}](command:${MANAGE_TRUST_COMMAND_ID})`,
 	when: ContextKeyExpr.and(ContextKeyExpr.equals('scm.providerCount', 0), WorkspaceTrustContext.IsEnabled, WorkspaceTrustContext.IsTrusted.toNegated())
+});
+
+viewsRegistry.registerViewWelcomeContent(VIEW_PANE_ID, {
+	content: localize('all repositories clean', "None of the repositories have changes."),
+	when: ContextKeys.SCMViewAreAllRepositoriesClean.isEqualTo(true),
+	exclusive: true
+});
+
+viewsRegistry.registerViewWelcomeContent(VIEW_PANE_ID, {
+	content: `[${localize('showCleanRepositories', "Show Clean Repositories")}](command:${TOGGLE_HIDE_CLEAN_REPOSITORIES_ACTION_ID})`,
+	when: ContextKeys.SCMViewAreAllRepositoriesClean.isEqualTo(true),
+	exclusive: true
 });
 
 viewsRegistry.registerViewWelcomeContent(HISTORY_VIEW_PANE_ID, {
@@ -285,6 +297,11 @@ Registry.as<IConfigurationRegistry>(ConfigurationExtensions.Configuration).regis
 			],
 			description: localize('scm.defaultViewSortKey', "Controls the default Source Control repository changes sort order when viewed as a list."),
 			default: 'path'
+		},
+		'scm.defaultHideCleanRepositories': {
+			type: 'boolean',
+			description: localize('scm.defaultHideCleanRepositories', "Controls whether repositories without any changes are hidden by default in the Source Control view when more than one repository is visible."),
+			default: false
 		},
 		'scm.autoReveal': {
 			type: 'boolean',
