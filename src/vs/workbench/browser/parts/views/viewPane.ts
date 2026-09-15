@@ -294,10 +294,15 @@ class ViewWelcomeController {
 	}
 
 	private getContentDescriptors(): IViewContentDescriptor[] {
-		const visibleItems = this.items.filter(v => v.visible);
+		let visibleItems = this.items.filter(v => v.visible);
 
 		if (visibleItems.length === 0 && this.defaultItem) {
 			return [this.defaultItem.descriptor];
+		}
+
+		// Exclusive content descriptors are rendered on their own
+		if (visibleItems.some(v => v.descriptor.exclusive)) {
+			visibleItems = visibleItems.filter(v => v.descriptor.exclusive);
 		}
 
 		return visibleItems.map(v => v.descriptor);

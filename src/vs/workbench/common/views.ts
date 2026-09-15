@@ -403,6 +403,14 @@ export interface IViewContentDescriptor {
 	readonly group?: string;
 	readonly order?: number;
 	readonly precondition?: ContextKeyExpression | undefined;
+	/**
+	 * Whether this content should be rendered on its own. When an exclusive
+	 * content descriptor is visible, all non-exclusive content descriptors
+	 * are hidden. This is useful for a view that shows the welcome content
+	 * for a state in which the content contributed by extensions (ex: how to
+	 * create a repository) does not make sense.
+	 */
+	readonly exclusive?: boolean;
 }
 
 export interface IViewsRegistry {

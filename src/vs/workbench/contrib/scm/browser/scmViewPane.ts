@@ -24,7 +24,7 @@ import { MenuItemAction, IMenuService, registerAction2, MenuId, IAction2Options,
 import { IAction, ActionRunner, Separator, IActionRunner, toAction } from '../../../../base/common/actions.js';
 import { IActionViewItemProvider } from '../../../../base/browser/ui/actionbar/actionbar.js';
 import { IThemeService, IFileIconTheme } from '../../../../platform/theme/common/themeService.js';
-import { isSCMResource, isSCMResourceGroup, isSCMRepository, isSCMInput, collectContextMenuActions, getActionViewItemProvider, isSCMActionButton, isSCMViewService, isSCMResourceNode, connectPrimaryMenu } from './util.js';
+import { isSCMResource, isSCMResourceGroup, isSCMRepository, isSCMInput, collectContextMenuActions, getActionViewItemProvider, isSCMActionButton, isSCMViewService, isSCMResourceNode, connectPrimaryMenu, getRepositoryResourceCount, hasRepositoryUnsynchronizedChanges } from './util.js';
 import { WorkbenchCompressibleAsyncDataTree, IOpenEvent } from '../../../../platform/list/browser/listService.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
 import { disposableTimeout, Sequencer, Throttler } from '../../../../base/common/async.js';
@@ -935,6 +935,8 @@ export const ContextKeys = {
 	SCMViewSortKey: new RawContextKey<ViewSortKey>('scmViewSortKey', ViewSortKey.Path),
 	SCMViewAreAllRepositoriesCollapsed: new RawContextKey<boolean>('scmViewAreAllRepositoriesCollapsed', false),
 	SCMViewIsAnyRepositoryCollapsible: new RawContextKey<boolean>('scmViewIsAnyRepositoryCollapsible', false),
+	SCMViewAreAllRepositoriesClean: new RawContextKey<boolean>('scmViewAreAllRepositoriesClean', false),
+	SCMViewHideCleanRepositories: new RawContextKey<boolean>('scmViewHideCleanRepositories', false),
 	SCMProvider: new RawContextKey<string | undefined>('scmProvider', undefined),
 	SCMProviderRootUri: new RawContextKey<string | undefined>('scmProviderRootUri', undefined),
 	SCMProviderHasRootUri: new RawContextKey<boolean>('scmProviderHasRootUri', undefined),
@@ -1285,6 +1287,31 @@ registerAction2(SetSortByNameAction);
 registerAction2(SetSortByPathAction);
 registerAction2(SetSortByStatusAction);
 
+export const TOGGLE_HIDE_CLEAN_REPOSITORIES_ACTION_ID = 'workbench.scm.action.toggleHideCleanRepositories';
+
+class ToggleHideCleanRepositoriesAction extends ViewAction<SCMViewPane> {
+	constructor() {
+		super({
+			id: TOGGLE_HIDE_CLEAN_REPOSITORIES_ACTION_ID,
+			title: localize('hideCleanRepositories', "Hide Clean Repositories"),
+			viewId: VIEW_PANE_ID,
+			f1: false,
+			toggled: ContextKeys.SCMViewHideCleanRepositories.isEqualTo(true),
+			menu: {
+				id: Menus.ViewSort,
+				when: ContextKeyExpr.greater(ContextKeys.RepositoryVisibilityCount.key, 1),
+				group: '3_repositories'
+			}
+		});
+	}
+
+	async runInView(_: ServicesAccessor, view: SCMViewPane): Promise<void> {
+		view.hideCleanRepositories = !view.hideCleanRepositories;
+	}
+}
+
+registerAction2(ToggleHideCleanRepositoriesAction);
+
 class CollapseAllRepositoriesAction extends ViewAction<SCMViewPane> {
 
 	constructor() {
@@ -1415,6 +1442,21 @@ export class SCMViewPane extends ViewPane {
 	private readonly _onDidChangeViewSortKey = this._register(new Emitter<ViewSortKey>());
 	readonly onDidChangeViewSortKey = this._onDidChangeViewSortKey.event;
 
+	private _hideCleanRepositories: boolean;
+	get hideCleanRepositories(): boolean { return this._hideCleanRepositories; }
+	set hideCleanRepositories(hideCleanRepositories: boolean) {
+		if (this._hideCleanRepositories === hideCleanRepositories) {
+			return;
+		}
+
+		this._hideCleanRepositories = hideCleanRepositories;
+
+		this.updateChildren();
+		this.hideCleanRepositoriesContextKey.set(hideCleanRepositories);
+
+		this.storageService.store(`scm.hideCleanRepositories`, hideCleanRepositories, StorageScope.WORKSPACE, StorageTarget.USER);
+	}
+
 	private readonly items = new DisposableMap<ISCMRepository, IDisposable>();
 	private readonly visibilityDisposables = new DisposableStore();
 
@@ -1426,6 +1468,8 @@ export class SCMViewPane extends ViewPane {
 	private viewSortKeyContextKey: IContextKey<ViewSortKey>;
 	private areAllRepositoriesCollapsedContextKey: IContextKey<boolean>;
 	private isAnyRepositoryCollapsibleContextKey: IContextKey<boolean>;
+	private areAllRepositoriesCleanContextKey: IContextKey<boolean>;
+	private hideCleanRepositoriesContextKey: IContextKey<boolean>;
 
 	private scmProviderContextKey: IContextKey<string | undefined>;
 	private scmProviderRootUriContextKey: IContextKey<string | undefined>;
@@ -1457,6 +1501,7 @@ export class SCMViewPane extends ViewPane {
 		// View mode and sort key
 		this._viewMode = this.getViewMode();
 		this._viewSortKey = this.getViewSortKey();
+		this._hideCleanRepositories = this.getHideCleanRepositories();
 
 		// Context Keys
 		this.viewModeContextKey = ContextKeys.SCMViewMode.bindTo(contextKeyService);
@@ -1465,6 +1510,9 @@ export class SCMViewPane extends ViewPane {
 		this.viewSortKeyContextKey.set(this.viewSortKey);
 		this.areAllRepositoriesCollapsedContextKey = ContextKeys.SCMViewAreAllRepositoriesCollapsed.bindTo(contextKeyService);
 		this.isAnyRepositoryCollapsibleContextKey = ContextKeys.SCMViewIsAnyRepositoryCollapsible.bindTo(contextKeyService);
+		this.areAllRepositoriesCleanContextKey = ContextKeys.SCMViewAreAllRepositoriesClean.bindTo(contextKeyService);
+		this.hideCleanRepositoriesContextKey = ContextKeys.SCMViewHideCleanRepositories.bindTo(contextKeyService);
+		this.hideCleanRepositoriesContextKey.set(this._hideCleanRepositories);
 		this.scmProviderContextKey = ContextKeys.SCMProvider.bindTo(contextKeyService);
 		this.scmProviderRootUriContextKey = ContextKeys.SCMProviderRootUri.bindTo(contextKeyService);
 		this.scmProviderHasRootUriContextKey = ContextKeys.SCMProviderHasRootUri.bindTo(contextKeyService);
@@ -1480,17 +1528,26 @@ export class SCMViewPane extends ViewPane {
 				case 'scm.viewSortKey':
 					this.viewSortKey = this.getViewSortKey();
 					break;
+				case 'scm.hideCleanRepositories':
+					this.hideCleanRepositories = this.getHideCleanRepositories();
+					break;
 			}
 		}, this, this.disposables);
 
 		this.storageService.onWillSaveState(e => {
 			this.viewMode = this.getViewMode();
 			this.viewSortKey = this.getViewSortKey();
+			this.hideCleanRepositories = this.getHideCleanRepositories();
 
 			this.storeTreeViewState();
 		}, this, this.disposables);
 
 		Event.any(this.scmService.onDidAddRepository, this.scmService.onDidRemoveRepository)(() => this._onDidChangeViewWelcomeState.fire(), this, this.disposables);
+
+		// The total number of repositories can change while the view is hidden, or
+		// without the new repository becoming visible (ex: single selection mode)
+		this.scmViewService.onDidChangeRepositories(this.updateTitleRepositoryCount, this, this.disposables);
+		this.updateTitleRepositoryCount();
 
 		this.disposables.add(this.revealResourceThrottler);
 		this.disposables.add(this.updateChildrenThrottler);
@@ -1607,7 +1664,7 @@ export class SCMViewPane extends ViewPane {
 		resourceActionRunner.onWillRun(() => this.tree.domFocus(), this, this.disposables);
 		this.disposables.add(resourceActionRunner);
 
-		const treeDataSource = this.instantiationService.createInstance(SCMTreeDataSource, () => this.viewMode);
+		const treeDataSource = this.instantiationService.createInstance(SCMTreeDataSource, () => this.viewMode, () => this.hideCleanRepositories);
 		this.disposables.add(treeDataSource);
 
 		const compressionEnabled = observableConfigValue('scm.compactFolders', true, this.configurationService);
@@ -1804,8 +1861,9 @@ export class SCMViewPane extends ViewPane {
 			const repositoryDisposables = new DisposableStore();
 
 			repositoryDisposables.add(autorun(reader => {
-				/** @description action button */
+				/** @description action button, synchronization state */
 				repository.provider.actionButton.read(reader);
+				hasRepositoryUnsynchronizedChanges(repository.provider, reader);
 				this.updateChildren(repository);
 			}));
 
@@ -1957,6 +2015,11 @@ export class SCMViewPane extends ViewPane {
 		return viewSortKey;
 	}
 
+	private getHideCleanRepositories(): boolean {
+		const defaultValue = this.configurationService.getValue<boolean>('scm.defaultHideCleanRepositories') === true;
+		return this.storageService.getBoolean(`scm.hideCleanRepositories`, StorageScope.WORKSPACE, defaultValue);
+	}
+
 	private loadTreeViewState(): IAsyncDataTreeViewState | undefined {
 		const storageViewState = this.storageService.get('scm.viewState2', StorageScope.WORKSPACE);
 		if (!storageViewState) {
@@ -1983,7 +2046,9 @@ export class SCMViewPane extends ViewPane {
 				async () => {
 					const focusedInput = this.inputRenderer.getFocusedInput();
 
-					if (element && this.tree.hasNode(element)) {
+					// A repository that became clean has to be removed from the tree, so
+					// the entire tree has to be refreshed instead of just the repository
+					if (element && this.tree.hasNode(element) && !isHiddenCleanRepository(this._hideCleanRepositories, this.scmViewService, element)) {
 						// Refresh specific repository
 						await this.tree.updateChildren(element);
 					} else {
@@ -1997,6 +2062,8 @@ export class SCMViewPane extends ViewPane {
 
 					this.updateScmProviderContextKeys();
 					this.updateRepositoryCollapseAllContextKeys();
+					this.updateRepositoryCleanContextKey();
+					this.updateTitleRepositoryCount();
 				}));
 	}
 
@@ -2019,6 +2086,39 @@ export class SCMViewPane extends ViewPane {
 			this.scmProviderContextKey.set(undefined);
 			this.scmProviderRootUriContextKey.set(undefined);
 			this.scmProviderHasRootUriContextKey.set(false);
+		}
+	}
+
+	private updateRepositoryCleanContextKey(): void {
+		const repositories = this.scmViewService.visibleRepositories;
+		const areAllRepositoriesClean = repositories.length > 0 &&
+			repositories.every(r => isHiddenCleanRepository(this._hideCleanRepositories, this.scmViewService, r));
+
+		if (this.areAllRepositoriesCleanContextKey.get() === areAllRepositoriesClean) {
+			return;
+		}
+
+		this.areAllRepositoriesCleanContextKey.set(areAllRepositoriesClean);
+		this._onDidChangeViewWelcomeState.fire();
+	}
+
+	/**
+	 * Renders the number of repositories that are rendered in the view and the
+	 * total number of repositories as the title description (ex: `2/5`). The
+	 * description is only rendered while clean repositories are hidden, and
+	 * there is more than one repository.
+	 */
+	private updateTitleRepositoryCount(): void {
+		const repositoryCount = this.scmViewService.repositories.length;
+		const renderedRepositoryCount = this.scmViewService.visibleRepositories
+			.filter(r => !isHiddenCleanRepository(this._hideCleanRepositories, this.scmViewService, r)).length;
+
+		const description = this._hideCleanRepositories && repositoryCount > 1
+			? `${renderedRepositoryCount}/${repositoryCount}`
+			: undefined;
+
+		if (this.titleDescription !== description) {
+			this.updateTitleDescription(description);
 		}
 	}
 
@@ -2066,13 +2166,18 @@ export class SCMViewPane extends ViewPane {
 	}
 
 	private async focusInput(delta: number): Promise<void> {
-		if (!this.scmViewService.focusedRepository ||
-			this.scmViewService.visibleRepositories.length === 0) {
+		// Repositories that are not rendered in the tree (ex: hidden clean
+		// repositories) do not have an input that can be focused
+		const repositories = this.scmViewService.visibleRepositories
+			.filter(r => this.tree.hasNode(r) || this.tree.hasNode(r.input));
+
+		if (!this.scmViewService.focusedRepository || repositories.length === 0) {
 			return;
 		}
 
-		let input = this.scmViewService.focusedRepository.input;
-		const repositories = this.scmViewService.visibleRepositories;
+		// Fallback to the first repository if the focused repository is not rendered
+		const focusedRepositoryIndex = Math.max(0, repositories.indexOf(this.scmViewService.focusedRepository));
+		let input = repositories[focusedRepositoryIndex].input;
 
 		// One visible repository and the input is already focused
 		if (repositories.length === 1 && this.inputRenderer.getRenderedInputWidget(input)?.hasFocus() === true) {
@@ -2081,7 +2186,6 @@ export class SCMViewPane extends ViewPane {
 
 		// Multiple visible repositories and the input already focused
 		if (repositories.length > 1 && this.inputRenderer.getRenderedInputWidget(input)?.hasFocus() === true) {
-			const focusedRepositoryIndex = repositories.indexOf(this.scmViewService.focusedRepository);
 			const newFocusedRepositoryIndex = rot(focusedRepositoryIndex + delta, repositories.length);
 			input = repositories[newFocusedRepositoryIndex].input;
 		}
@@ -2144,7 +2248,7 @@ export class SCMViewPane extends ViewPane {
 	}
 
 	override shouldShowWelcome(): boolean {
-		return this.scmService.repositoryCount === 0;
+		return this.scmService.repositoryCount === 0 || this.areAllRepositoriesCleanContextKey.get() === true;
 	}
 
 	override getActionsContext(): unknown {
@@ -2186,9 +2290,24 @@ export class SCMViewPane extends ViewPane {
 	}
 }
 
+/**
+ * A repository is considered clean when it has no changes and nothing to
+ * synchronize with the remote (tracking) reference. Clean repositories are
+ * only hidden when there is more than one visible repository so that the
+ * source control input is always available when working with a single
+ * repository.
+ */
+function isHiddenCleanRepository(hideCleanRepositories: boolean, scmViewService: ISCMViewService, repository: ISCMRepository): boolean {
+	return hideCleanRepositories &&
+		scmViewService.visibleRepositories.length > 1 &&
+		getRepositoryResourceCount(repository.provider) === 0 &&
+		!hasRepositoryUnsynchronizedChanges(repository.provider);
+}
+
 class SCMTreeDataSource extends Disposable implements IAsyncDataSource<ISCMViewService, TreeElement> {
 	constructor(
 		private readonly viewMode: () => ViewMode,
+		private readonly hideCleanRepositories: () => boolean,
 		@IConfigurationService private readonly configurationService: IConfigurationService,
 		@ISCMViewService private readonly scmViewService: ISCMViewService
 	) {
@@ -2202,7 +2321,8 @@ class SCMTreeDataSource extends Disposable implements IAsyncDataSource<ISCMViewS
 		const alwaysShowRepositories = this.configurationService.getValue<boolean>('scm.alwaysShowRepositories') === true;
 
 		if (isSCMViewService(inputOrElement) && (repositoryCount > 1 || alwaysShowRepositories)) {
-			return this.scmViewService.visibleRepositories;
+			return this.scmViewService.visibleRepositories
+				.filter(repository => !isHiddenCleanRepository(this.hideCleanRepositories(), this.scmViewService, repository));
 		} else if ((isSCMViewService(inputOrElement) && repositoryCount === 1 && !alwaysShowRepositories) || isSCMRepository(inputOrElement)) {
 			const children: TreeElement[] = [];
 

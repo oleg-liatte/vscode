@@ -18,6 +18,7 @@ import { Command } from '../../../../editor/common/languages.js';
 import { reset } from '../../../../base/browser/dom.js';
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
 import { IResourceNode, ResourceTree } from '../../../../base/common/resourceTree.js';
+import { IReader } from '../../../../base/common/observable.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
 import { Codicon } from '../../../../base/common/codicons.js';
 import { SCMArtifactGroupTreeElement, SCMArtifactTreeElement } from '../common/artifact.js';
@@ -178,6 +179,23 @@ export function getProviderKey(provider: ISCMProvider): string {
 
 export function getRepositoryResourceCount(provider: ISCMProvider): number {
 	return provider.groups.reduce<number>((r, g) => r + g.resources.length, 0);
+}
+
+/**
+ * Whether the repository has changes that can be synchronized with the
+ * remote (tracking) reference (ex: commits to push and/or to pull).
+ */
+export function hasRepositoryUnsynchronizedChanges(provider: ISCMProvider, reader?: IReader): boolean {
+	const historyProvider = provider.historyProvider.read(reader);
+	if (!historyProvider) {
+		return false;
+	}
+
+	const historyItemRef = historyProvider.historyItemRef.read(reader);
+	const historyItemRemoteRef = historyProvider.historyItemRemoteRef.read(reader);
+
+	return !!historyItemRef?.revision && !!historyItemRemoteRef?.revision &&
+		historyItemRef.revision !== historyItemRemoteRef.revision;
 }
 
 export function getHistoryItemEditorTitle(historyItem: ISCMHistoryItem): string {
